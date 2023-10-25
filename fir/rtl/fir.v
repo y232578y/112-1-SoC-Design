@@ -7,25 +7,21 @@ module fir
     parameter Tape_Num    = 11
 )
 (
-    //Read address channel(RA)
+    
     output  wire                     arready,
     input   wire [(pADDR_WIDTH-1):0] araddr,
     input   wire                     arvalid, 
-    //Read data channel(RD)
     output  wire                     rvalid,
     output  wire [(pDATA_WIDTH-1):0] rdata,
     input   wire                     rready,
-    //Write address channel(WA)
+    
     output  wire                     awready,
     input   wire [(pADDR_WIDTH-1):0] awaddr,
     input   wire                     awvalid,
-    //Write data channel(WD)
     output  wire                     wready,
     input   wire                     wvalid,
     input   wire [(pDATA_WIDTH-1):0] wdata,
 
-
-    //streaming
     output  wire                     ss_tready,
     output  wire                     sm_tvalid, 
     output  wire [(pDATA_WIDTH-1):0] sm_tdata, 
@@ -77,19 +73,16 @@ bram11 bram11_axistream(
 
 /******************FSM*********************/
 parameter                   IDLE = 2'b00;
-parameter                   INPUT_TAP = 2'b01;
+parameter                   COLLECT_TAP = 2'b01;
 parameter                   COMPUTE = 2'b10;
 parameter                   DONE = 2'b11;
 reg     [1:0]               next_state;
 reg     [1:0]               current_state;
 
 /******************AXI LITE*********************/
-reg                         write_cnt;  // let awready follows awvalid's second clock and pulls up to 1, 
-                                            // then pulls down to 0, wready follows wvalid's second clock and pulls up to 1, 
-                                            // then pulls down to 0
-reg [1:0]                   read_cnt;
+reg                         write_cnt;  
 reg [5:0]                   tap_cnt;                                         
-reg                         awready_r;    // write address control : if awready is 1, tap_A = awaddr
+reg                         awready_r; 
 reg                         wready_r;
 
 reg [(pADDR_WIDTH-1):0]     tap_A_r;
@@ -117,12 +110,38 @@ reg    [(pDATA_WIDTH-1):0]  Yn;
 wire                        pattern_done;
 
 
-/***************************************************************CIRCUIT***************************************************************/
+/******************FSM*********************/
 
+always @(posedge axis_clk or negedge axis_rst_n) begin
+    if(!axis_rst_n) current_state <= IDLE;
+    else current_state <= next_state;
+end
 
-/***********************************************/
-/******************TAP BRAM*********************/
-/***********************************************/
+always @(*) begin
+    case(current_state)
+        IDLE: begin
+            if(wdata == 32'd600) next_state = COLLECT_TAP;
+            else next_state = IDLE;
+        end
+        COLLECT_TAP: begin
+            if(awaddr == 12'h000 && wdata == 32'd1) next_state = COMPUTE;
+            else next_state = COLLECT_TAP;
+        end
+        COMPUTE: begin
+            if(pattern_number == 600 && sm_tready && sm_tvalid) next_state = DONE;
+            else next_state = COMPUTE;
+        end
+        DONE: begin
+            if(rdata == 32'd2) next_state = IDLE;
+            else next_state = DONE;
+        end
+        default:begin
+            next_state = IDLE;
+        end
+    endcase
+end
+
+/******************TAP *********************/
 assign tap_EN = 1'b1;
 assign tap_A = tap_A_r;
 assign tap_Di = tap_Di_r;
@@ -130,7 +149,7 @@ assign tap_WE = tap_WE_r;
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
     if(~axis_rst_n) tap_cnt <= 6'b000000;
-    else if (current_state == INPUT_TAP) tap_cnt <= 0;
+    else if (current_state == COLLECT_TAP) tap_cnt <= 0;
     else if (current_state == COMPUTE) begin
         if (data_WE == 4'b1111) tap_cnt <= 6'b000000;
         else if(ss_tready == 1) tap_cnt <= 6'b000000;
@@ -141,12 +160,12 @@ end
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
     if(~axis_rst_n) tap_A_r <= 12'h000;
-    else if (awvalid == 1 && awready == 1 && current_state == INPUT_TAP) begin
+    else if (awvalid == 1 && awready == 1 && current_state == COLLECT_TAP) begin
         if(awaddr >= 12'h020) tap_A_r <= awaddr - 12'h020;
         else if(awaddr == 12'h010) tap_A_r <= awaddr;
         else tap_A_r <= 12'h000;
     end
-    else if (arvalid == 1 && current_state == INPUT_TAP) begin
+    else if (arvalid == 1 && current_state == COLLECT_TAP) begin
         if(araddr >= 12'h020) tap_A_r <= araddr - 12'h020;
         else if(araddr == 12'h000) tap_A_r <= 12'h000;
         else tap_A_r <= tap_A_r;
@@ -181,13 +200,11 @@ always @(posedge axis_clk or negedge axis_rst_n) begin
 end
 
 
-/***********************************************/
+
 /******************AXI LITE*********************/
-/***********************************************/
-assign rdata =  (rvalid && current_state == INPUT_TAP)?     tap_Do:
+assign rdata =  (rvalid && current_state == COLLECT_TAP)?     tap_Do:
                 (rvalid && current_state == COMPUTE)?               tap_Do:
-                (rvalid && current_state == DONE)?                  32'd2:
-                                                                    32'd4; 
+                (rvalid && current_state == DONE)?                  32'd2:32'd4; 
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
     if(~axis_rst_n) write_cnt <= 1'b0;
@@ -219,42 +236,11 @@ always @(posedge axis_clk or negedge axis_rst_n) begin
 end
 
 
-/******************************************/
-/******************FSM*********************/
-/******************************************/
-always @(posedge axis_clk or negedge axis_rst_n) begin
-    if(!axis_rst_n) current_state <= IDLE;
-    else current_state <= next_state;
-end
-
-always @(*) begin
-    case(current_state)
-        IDLE: begin
-            if(wdata == 32'd600) next_state = INPUT_TAP;
-            else next_state = IDLE;
-        end
-        INPUT_TAP: begin
-            if(awaddr == 12'h000 && wdata == 32'd1) next_state = COMPUTE;
-            else next_state = INPUT_TAP;
-        end
-        COMPUTE: begin
-            if(pattern_number == 600 && sm_tready && sm_tvalid) next_state = DONE;
-            else next_state = COMPUTE;
-        end
-        DONE: begin
-            if(rdata == 32'd2) next_state = IDLE;
-            else next_state = DONE;
-        end
-        default:begin
-            next_state = IDLE;
-        end
-    endcase
-end
 
 
-/************************************************/
-/******************DATA BRAM*********************/
-/************************************************/
+
+/******************DATA*********************/
+
 assign data_Di = data_Di_r;
 assign data_A = data_A_r;
 assign data_EN = 1'b1;
@@ -269,19 +255,19 @@ end
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
     if(!axis_rst_n) data_Di_r <= 32'b0;
-    else if(current_state == INPUT_TAP) data_Di_r <= 32'b0;
+    else if(current_state == COLLECT_TAP) data_Di_r <= 32'b0;
     else if(current_state == COMPUTE) data_Di_r <= ss_tdata;
     else data_Di_r <= data_Di_r;
 end
 
 always @(posedge axis_clk or negedge axis_rst_n) begin
     if(!axis_rst_n) data_A_r <= 12'h000;
-    else if (current_state == INPUT_TAP && awvalid == 1 && awready == 1) begin
+    else if (current_state == COLLECT_TAP && awvalid == 1 && awready == 1) begin
         if (awaddr != 12'h010) data_A_r <= awaddr - 12'h020;
         else if (awaddr == 12'h010) data_A_r <= 12'h000;
         else data_A_r <= data_A_r;
     end
-    else if(current_state == INPUT_TAP && arvalid == 1) data_A_r <= araddr - 12'h020;
+    else if(current_state == COLLECT_TAP && arvalid == 1) data_A_r <= araddr - 12'h020;
     else if(current_state == COMPUTE) begin
         if(ss_tready == 1 && pattern_cycle < 12'd11) data_A_r <= (pattern_cycle << 2);    // write data
         else if(ss_tready == 1 && pattern_cycle == 12'd11) data_A_r <= 0;                 // wrtie data
@@ -295,7 +281,7 @@ always @(posedge axis_clk or negedge axis_rst_n) begin
 end
 /****************************************************/
 /******************AXI Streaming*********************/
-/****************************************************/
+
 assign ss_tready = (current_state == COMPUTE && compute_cnt == 0)? 1:0;
 assign sm_tvalid = (pattern_number != 9'd1)? pattern_done:0;
 assign sm_tlast = (pattern_number == 600 && pattern_done == 1)? 1:0;
